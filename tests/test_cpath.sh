@@ -8,6 +8,7 @@ PASS_COUNT=0
 FAIL_COUNT=0
 
 TMP_ROOT=$(mktemp -d)
+TMP_ROOT=$(cd -P "$TMP_ROOT" && pwd -P)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 pass() {
@@ -294,11 +295,18 @@ for tool in bash cat realpath dirname basename pwd tr hostname uname id mkdir rm
   fi
 done
 
-NON_UTF8_FILE="$SPECIAL_DIR/"$'raw-\xff-byte'
-touch "$NON_UTF8_FILE"
-py_b64_raw_ok=$(python3 - "$CPATH_BIN" "$TEST_XDG" "$NO_B64_BIN" "$NON_UTF8_FILE" "$SPECIAL_DIR_CANON" <<'PY'
-import base64, os, subprocess, sys
-cpath_bin, xdg, path_dir, raw_file, special_canon = sys.argv[1:6]
+py_b64_raw_ok=$(python3 - "$CPATH_BIN" "$TEST_XDG" "$NO_B64_BIN" "$SPECIAL_DIR_CANON" <<'PY'
+import base64, errno, os, subprocess, sys
+cpath_bin, xdg, path_dir, special_canon = sys.argv[1:5]
+raw_file = os.fsencode(special_canon) + b"/raw-\xff-byte"
+try:
+    with open(raw_file, "wb"):
+        pass
+except OSError as exc:
+    if exc.errno != errno.EILSEQ:
+        raise
+    print("RAW_UNSUPPORTED")
+    sys.exit(0)
 env = {
     "HOME": os.environ["HOME"],
     "PATH": path_dir,
@@ -313,12 +321,15 @@ p = subprocess.run(
 if p.returncode != 0:
     sys.stderr.buffer.write(p.stderr)
     sys.exit(p.returncode)
-expected_bytes = os.fsencode(special_canon) + b"/raw-\xff-byte"
-expected_osc = b"\x1b]52;c;" + base64.b64encode(expected_bytes) + b"\x07"
+expected_osc = b"\x1b]52;c;" + base64.b64encode(raw_file) + b"\x07"
 print("RAW_OK" if p.stdout.startswith(expected_osc) else "RAW_MISMATCH")
 PY
 )
-assert_eq "Python base64 fallback encodes non-UTF-8 0xff filename" "RAW_OK" "$py_b64_raw_ok"
+if [ "$py_b64_raw_ok" = RAW_UNSUPPORTED ]; then
+  printf '  [SKIP] File system rejects non-UTF-8 filenames (EILSEQ)\n'
+else
+  assert_eq "Python base64 fallback encodes non-UTF-8 0xff filename" "RAW_OK" "$py_b64_raw_ok"
+fi
 
 LARGE_DIR="$TMP_ROOT/large-paths"
 mkdir -p "$LARGE_DIR"
