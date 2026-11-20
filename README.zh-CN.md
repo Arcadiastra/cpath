@@ -25,6 +25,23 @@ curl -fsSL https://raw.githubusercontent.com/Arcadiastra/cpath/main/install.sh |
 
 交互式终端下，安装脚本会一步询问本机的持久化主机别名（直接回车即不写死，走动态默认）；在无终端的自动化/容器/CI 环境中会自动静默跳过。
 
+### Debian / Ubuntu（`.deb` 安装包）
+
+从 [GitHub Releases](https://github.com/Arcadiastra/cpath/releases) 下载 `.deb` 包并使用 `apt` 安装（自动安装 `/usr/bin/cpath`、Bash/Zsh 系统补全以及 `man cpath` 手册页）：
+
+```bash
+curl -fsSLO https://github.com/Arcadiastra/cpath/releases/download/v0.1.0/cpath_0.1.0_all.deb
+sudo apt install ./cpath_0.1.0_all.deb
+```
+
+### Homebrew（macOS / Linux）
+
+通过 [Homebrew Tap](https://github.com/Arcadiastra/homebrew-tap) 安装 `cpath`、Bash 和 Zsh 补全，以及 `man cpath` 手册页。
+
+```bash
+brew install arcadiastra/tap/cpath
+```
+
 ### 本地仓库安装
 
 ```bash

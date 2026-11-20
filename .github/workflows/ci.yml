@@ -16,8 +16,22 @@ jobs:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
         with:
           persist-credentials: false
+      - name: Lint shell scripts
+        run: |
+          shellcheck bin/cpath install.sh uninstall.sh completions/cpath.bash \
+            packaging/build-deb.sh packaging/render-homebrew-formula.sh \
+            tests/test_cpath.sh tests/test_macos_clipboard.sh
       - name: Run CLI suite
         run: bash tests/test_cpath.sh
+      - name: Verify .deb, man page, and Homebrew formula build
+        run: |
+          set -euo pipefail
+          groff -man -Tutf8 -ww -z man/cpath.1
+          version=$(sed -n 's/^VERSION="\([^"]*\)"$/\1/p' bin/cpath | head -n 1)
+          ./packaging/build-deb.sh "$version" dist
+          dpkg-deb --info "dist/cpath_${version}_all.deb" >/dev/null
+          ./packaging/render-homebrew-formula.sh "$version" "$(printf '%064d' 0)" dist/cpath.rb
+          ruby -c dist/cpath.rb
 
   macos:
     runs-on: macos-15

@@ -1,0 +1,129 @@
+.TH CPATH 1 "November 2026" "cpath 0.1.0" "User Commands"
+.SH NAME
+cpath \- copy canonical absolute paths across local shells and SSH (OSC 52)
+.SH SYNOPSIS
+.B cpath
+[\fIOPTIONS\fR] [\fIPATH\fR...]
+.br
+.B cpath
+\fB\-\-set\-host\fR [\fIALIAS\fR]
+.br
+.B cpath
+\fB\-\-clear\-host\fR
+.SH DESCRIPTION
+.B cpath
+resolves one or more files or directories to their canonical absolute paths and
+copies the result to the clipboard. When no
+.I PATH
+argument is provided, the current working directory (\fB.\fR) is used.
+Multiple
+.I PATH
+arguments are joined with newlines.
+.PP
+In local sessions,
+.B cpath
+automatically selects an available native clipboard backend. In SSH sessions, it
+emits an OSC 52 escape sequence so modern terminal emulators write directly to
+the local clipboard without X11 forwarding.
+.SH OPTIONS
+Short options may be bundled (for example, \fB\-sd\fR or \fB\-ud\fR). Use
+\fB\-\-\fR to end option parsing before paths that begin with a hyphen.
+.TP
+.B \-d
+If a resolved
+.I PATH
+is not a directory, use its parent directory instead.
+.TP
+.B \-s
+Prepend the resolved host name in \fIhost:/abs/path\fR format.
+.TP
+.B \-u
+Prepend the current user name and host name in \fIuser@host:/abs/path\fR format.
+.TP
+.B \-n
+Do not dereference symbolic links; normalize logical path components instead.
+.TP
+.B \-p
+Print the resulting path(s) to standard output without writing to the clipboard.
+.TP
+.BR \-h ", " \-\-help
+Display usage information and exit.
+.TP
+.BR \-v ", " \-\-version
+Display version information and exit.
+.TP
+.BR \-\-set\-host " [" \fIALIAS\fR ]
+Save a persistent host alias for this machine to
+.IR ~/.config/cpath/host .
+Prompts interactively on
+.I /dev/tty
+if
+.I ALIAS
+is omitted.
+.TP
+.B \-\-clear\-host
+Remove the saved persistent host alias and fall back to dynamic host resolution.
+.SH HOST RESOLUTION
+When \fB\-s\fR or \fB\-u\fR is given,
+.B cpath
+resolves the host name in the following priority order (highest to lowest):
+.IP 1. 4
+.B $CPATH_HOST
+(one-off environment variable override)
+.IP 2. 4
+.I ${XDG_CONFIG_HOME:-~/.config}/cpath/host
+(persistent per-machine alias)
+.IP 3. 4
+.B $LC_SSH_HOST
+(forwarded via OpenSSH \fBSetEnv\fR in local \fI~/.ssh/config\fR)
+.IP 4. 4
+System host name from \fBhostname\fR(1) or \fBuname \-n\fR.
+.SH CLIPBOARD BACKENDS
+When \fBSSH_CONNECTION\fR, \fBSSH_TTY\fR, or \fBSSH_CLIENT\fR is set,
+.B cpath
+sends a standard OSC 52 sequence to \fI/dev/tty\fR (or standard output if no
+controlling terminal is attached).
+.PP
+Otherwise, local backends are probed in order:
+.BR pbcopy (1)
+(macOS),
+.BR wl\-copy (1)
+(Wayland, requires \fBWAYLAND_DISPLAY\fR),
+.BR xclip (1)
+and
+.BR xsel (1)
+(X11, requires \fBDISPLAY\fR), and
+.B clip.exe
+(Windows WSL).
+.SH ENVIRONMENT
+.TP
+.B CPATH_HOST
+Highest-priority host alias override for \fB\-s\fR and \fB\-u\fR.
+.TP
+.B LC_SSH_HOST
+Forwarded SSH config host alias used when no saved alias is configured.
+.TP
+.B XDG_CONFIG_HOME
+Base directory for persistent configuration (defaults to \fI~/.config\fR).
+.SH FILES
+.TP
+.I ${XDG_CONFIG_HOME:-~/.config}/cpath/host
+Persistent host alias written by \fBcpath \-\-set\-host\fR.
+.SH EXAMPLES
+.TP
+Copy the current directory path:
+.B cpath
+.TP
+Copy the directory containing a file in \fIhost:path\fR format:
+.B cpath \-sd ./config/app.yaml
+.TP
+Copy a path without dereferencing symbolic links:
+.B cpath \-n /var/www/current/index.html
+.TP
+Print a remote path for command substitution:
+.B scp "$(cpath \-sp ./artifact.tar.gz)" ./
+.SH EXIT STATUS
+Returns 0 on success, or non-zero if option parsing, path resolution, or
+clipboard writing fails.
+.SH LICENSE
+MIT License. See \fIhttps://github.com/Arcadiastra/cpath\fR.

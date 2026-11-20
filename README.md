@@ -25,6 +25,23 @@ curl -fsSL https://raw.githubusercontent.com/Arcadiastra/cpath/main/install.sh |
 
 During interactive installation, you can optionally set a persistent host alias for the machine (press **Enter** to skip and use the dynamic hostname). In non-interactive / CI / container environments, the prompt is silently skipped.
 
+### Debian / Ubuntu (`.deb` package)
+
+Download the `.deb` asset from [GitHub Releases](https://github.com/Arcadiastra/cpath/releases) and install with `apt` (includes `/usr/bin/cpath`, Bash/Zsh completions, and `man cpath`):
+
+```bash
+curl -fsSLO https://github.com/Arcadiastra/cpath/releases/download/v0.1.0/cpath_0.1.0_all.deb
+sudo apt install ./cpath_0.1.0_all.deb
+```
+
+### Homebrew (macOS / Linux)
+
+Install `cpath`, its Bash and Zsh completions, and its man page from the [Homebrew tap](https://github.com/Arcadiastra/homebrew-tap).
+
+```bash
+brew install arcadiastra/tap/cpath
+```
+
 ### Install from a local clone
 
 ```bash
