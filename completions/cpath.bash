@@ -285,11 +285,15 @@ _cpath_completions() {
     return 0
   fi
 
-  # Handle setups where "=" is removed from COMP_WORDBREAKS:
-  #   cpath --set-host=pro<TAB>  -> cur="--set-host=pro"
+  # Bash 3.2 can report the full token in COMP_WORDS while Readline replaces
+  # only the suffix after "=". The callback's second argument is that span.
+  # When "=" is not a word break, replace the full token instead.
   case "$cur" in
     --set-host=*)
-      _cpath_complete_hosts "${cur#--set-host=}" "--set-host="
+      case "${2-$cur}" in
+        --set-host=*) _cpath_complete_hosts "${cur#--set-host=}" "--set-host=" ;;
+        *) _cpath_complete_hosts "${cur#--set-host=}" ;;
+      esac
       return 0
       ;;
     --*)

@@ -8,6 +8,7 @@ PASS_COUNT=0
 FAIL_COUNT=0
 
 TMP_ROOT=$(mktemp -d)
+TMP_ROOT=$(cd -P "$TMP_ROOT" && pwd -P)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 pass() {
@@ -294,11 +295,18 @@ for tool in bash cat realpath dirname basename pwd tr hostname uname id mkdir rm
   fi
 done
 
-NON_UTF8_FILE="$SPECIAL_DIR/"$'raw-\xff-byte'
-touch "$NON_UTF8_FILE"
-py_b64_raw_ok=$(python3 - "$CPATH_BIN" "$TEST_XDG" "$NO_B64_BIN" "$NON_UTF8_FILE" "$SPECIAL_DIR_CANON" <<'PY'
-import base64, os, subprocess, sys
-cpath_bin, xdg, path_dir, raw_file, special_canon = sys.argv[1:6]
+py_b64_raw_ok=$(python3 - "$CPATH_BIN" "$TEST_XDG" "$NO_B64_BIN" "$SPECIAL_DIR_CANON" <<'PY'
+import base64, errno, os, subprocess, sys
+cpath_bin, xdg, path_dir, special_canon = sys.argv[1:5]
+raw_file = os.fsencode(special_canon) + b"/raw-\xff-byte"
+try:
+    with open(raw_file, "wb"):
+        pass
+except OSError as exc:
+    if exc.errno != errno.EILSEQ:
+        raise
+    print("RAW_UNSUPPORTED")
+    sys.exit(0)
 env = {
     "HOME": os.environ["HOME"],
     "PATH": path_dir,
@@ -313,12 +321,15 @@ p = subprocess.run(
 if p.returncode != 0:
     sys.stderr.buffer.write(p.stderr)
     sys.exit(p.returncode)
-expected_bytes = os.fsencode(special_canon) + b"/raw-\xff-byte"
-expected_osc = b"\x1b]52;c;" + base64.b64encode(expected_bytes) + b"\x07"
+expected_osc = b"\x1b]52;c;" + base64.b64encode(raw_file) + b"\x07"
 print("RAW_OK" if p.stdout.startswith(expected_osc) else "RAW_MISMATCH")
 PY
 )
-assert_eq "Python base64 fallback encodes non-UTF-8 0xff filename" "RAW_OK" "$py_b64_raw_ok"
+if [ "$py_b64_raw_ok" = RAW_UNSUPPORTED ]; then
+  printf '  [SKIP] File system rejects non-UTF-8 filenames (EILSEQ)\n'
+else
+  assert_eq "Python base64 fallback encodes non-UTF-8 0xff filename" "RAW_OK" "$py_b64_raw_ok"
+fi
 
 LARGE_DIR="$TMP_ROOT/large-paths"
 mkdir -p "$LARGE_DIR"
@@ -509,16 +520,20 @@ if command -v busybox >/dev/null 2>&1; then
 fi
 
 # 7a-2. GNU realpath ONLY (no python3, no readlink) still resolves dangling symlink with trailing slash
-GNU_ONLY_BIN="$TMP_ROOT/gnu-only-bin"
-mkdir -p "$GNU_ONLY_BIN"
-for tool in bash realpath; do
-  if tool_path=$(command -v "$tool" 2>/dev/null); then
-    ln -sf "$tool_path" "$GNU_ONLY_BIN/$tool"
-  fi
-done
-assert_eq "GNU realpath alone resolves dangling symlink with trailing slash without readlink" \
-  "$REAL_DIR_CANON/future-leaf.txt" \
-  "$(env -i HOME="$HOME" PATH="$GNU_ONLY_BIN" XDG_CONFIG_HOME="$TEST_XDG" "$CPATH_BIN" -p "$FIXTURE/dangling-valid-parent/")"
+if realpath_version=$(realpath --version 2>/dev/null) && [[ "$realpath_version" == *'GNU coreutils'* ]]; then
+  GNU_ONLY_BIN="$TMP_ROOT/gnu-only-bin"
+  mkdir -p "$GNU_ONLY_BIN"
+  for tool in bash realpath; do
+    if tool_path=$(command -v "$tool" 2>/dev/null); then
+      ln -sf "$tool_path" "$GNU_ONLY_BIN/$tool"
+    fi
+  done
+  assert_eq "GNU realpath alone resolves dangling symlink with trailing slash without readlink" \
+    "$REAL_DIR_CANON/future-leaf.txt" \
+    "$(env -i HOME="$HOME" PATH="$GNU_ONLY_BIN" XDG_CONFIG_HOME="$TEST_XDG" "$CPATH_BIN" -p "$FIXTURE/dangling-valid-parent/")"
+else
+  printf '  [SKIP] GNU-only realpath assertion (GNU coreutils not detected)\n'
+fi
 
 # 7b. Python3 fallback (no realpath in PATH)
 PY_BIN="$TMP_ROOT/py-bin"
@@ -828,8 +843,8 @@ def test_tab(typed, disable_compopt=False, run_enter=False):
     return out
 
 out_space = test_tab("cpath --set-host pro\t")
-out_eq_prefix = test_tab("cpath --set-host=pro\t")
-out_eq_web = test_tab("cpath --set-host=web\t")
+out_eq_prefix = test_tab("cpath --set-host=pro\t", run_enter=True)
+out_eq_web = test_tab("cpath --set-host=web\t", run_enter=True)
 out_nomatch_space = test_tab("cpath --set-host rep\t")
 out_nomatch_eq = test_tab("cpath --set-host=rep\t")
 out_path_file = test_tab("cpath rep\t")
@@ -856,7 +871,7 @@ with open(os.path.join(xdg, "cpath", "host"), "r") as hf:
     saved_staging = hf.read().strip()
 print("SPACE_OK=" + ("yes" if "cpath --set-host prod-api" in out_space else "no:" + repr(out_space)))
 print("EQ_PRO_OK=" + ("yes" if "cpath --set-host=prod-api" in out_eq_prefix else "no:" + repr(out_eq_prefix)))
-print("EQ_WEB_OK=" + ("yes" if "cpath --set-host=web-01" in out_eq_web else "no:" + repr(out_eq_web)))
+print("EQ_WEB_OK=" + ("yes" if "Saved host alias: web-01" in out_eq_web else "no:" + repr(out_eq_web)))
 print("NOMATCH_SPACE_OK=" + ("yes" if "report.txt" not in out_nomatch_space else "no:" + repr(out_nomatch_space)))
 print("NOMATCH_EQ_OK=" + ("yes" if "report.txt" not in out_nomatch_eq else "no:" + repr(out_nomatch_eq)))
 print("PATH_FILE_OK=" + ("yes" if "cpath report.txt" in out_path_file else "no:" + repr(out_path_file)))
