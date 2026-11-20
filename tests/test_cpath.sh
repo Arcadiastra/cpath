@@ -843,8 +843,8 @@ def test_tab(typed, disable_compopt=False, run_enter=False):
     return out
 
 out_space = test_tab("cpath --set-host pro\t")
-out_eq_prefix = test_tab("cpath --set-host=pro\t")
-out_eq_web = test_tab("cpath --set-host=web\t")
+out_eq_prefix = test_tab("cpath --set-host=pro\t", run_enter=True)
+out_eq_web = test_tab("cpath --set-host=web\t", run_enter=True)
 out_nomatch_space = test_tab("cpath --set-host rep\t")
 out_nomatch_eq = test_tab("cpath --set-host=rep\t")
 out_path_file = test_tab("cpath rep\t")
@@ -871,7 +871,7 @@ with open(os.path.join(xdg, "cpath", "host"), "r") as hf:
     saved_staging = hf.read().strip()
 print("SPACE_OK=" + ("yes" if "cpath --set-host prod-api" in out_space else "no:" + repr(out_space)))
 print("EQ_PRO_OK=" + ("yes" if "cpath --set-host=prod-api" in out_eq_prefix else "no:" + repr(out_eq_prefix)))
-print("EQ_WEB_OK=" + ("yes" if "cpath --set-host=web-01" in out_eq_web else "no:" + repr(out_eq_web)))
+print("EQ_WEB_OK=" + ("yes" if "Saved host alias: web-01" in out_eq_web else "no:" + repr(out_eq_web)))
 print("NOMATCH_SPACE_OK=" + ("yes" if "report.txt" not in out_nomatch_space else "no:" + repr(out_nomatch_space)))
 print("NOMATCH_EQ_OK=" + ("yes" if "report.txt" not in out_nomatch_eq else "no:" + repr(out_nomatch_eq)))
 print("PATH_FILE_OK=" + ("yes" if "cpath report.txt" in out_path_file else "no:" + repr(out_path_file)))
