@@ -1,0 +1,43 @@
+name: CLI tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Run CLI suite
+        run: bash tests/test_cpath.sh
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Run CLI suite with macOS system tools
+        shell: /bin/bash --noprofile --norc -eo pipefail {0}
+        env:
+          PATH: /usr/bin:/bin:/usr/sbin:/sbin
+        run: |
+          sw_vers
+          uname -m
+          /bin/bash --version
+          python3 --version
+          /bin/bash tests/test_cpath.sh
+      - name: Verify native macOS pasteboard
+        shell: /bin/bash --noprofile --norc -eo pipefail {0}
+        env:
+          PATH: /usr/bin:/bin:/usr/sbin:/sbin
+        run: /bin/bash tests/test_macos_clipboard.sh

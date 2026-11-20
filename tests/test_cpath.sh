@@ -509,16 +509,20 @@ if command -v busybox >/dev/null 2>&1; then
 fi
 
 # 7a-2. GNU realpath ONLY (no python3, no readlink) still resolves dangling symlink with trailing slash
-GNU_ONLY_BIN="$TMP_ROOT/gnu-only-bin"
-mkdir -p "$GNU_ONLY_BIN"
-for tool in bash realpath; do
-  if tool_path=$(command -v "$tool" 2>/dev/null); then
-    ln -sf "$tool_path" "$GNU_ONLY_BIN/$tool"
-  fi
-done
-assert_eq "GNU realpath alone resolves dangling symlink with trailing slash without readlink" \
-  "$REAL_DIR_CANON/future-leaf.txt" \
-  "$(env -i HOME="$HOME" PATH="$GNU_ONLY_BIN" XDG_CONFIG_HOME="$TEST_XDG" "$CPATH_BIN" -p "$FIXTURE/dangling-valid-parent/")"
+if realpath_version=$(realpath --version 2>/dev/null) && [[ "$realpath_version" == *'GNU coreutils'* ]]; then
+  GNU_ONLY_BIN="$TMP_ROOT/gnu-only-bin"
+  mkdir -p "$GNU_ONLY_BIN"
+  for tool in bash realpath; do
+    if tool_path=$(command -v "$tool" 2>/dev/null); then
+      ln -sf "$tool_path" "$GNU_ONLY_BIN/$tool"
+    fi
+  done
+  assert_eq "GNU realpath alone resolves dangling symlink with trailing slash without readlink" \
+    "$REAL_DIR_CANON/future-leaf.txt" \
+    "$(env -i HOME="$HOME" PATH="$GNU_ONLY_BIN" XDG_CONFIG_HOME="$TEST_XDG" "$CPATH_BIN" -p "$FIXTURE/dangling-valid-parent/")"
+else
+  printf '  [SKIP] GNU-only realpath assertion (GNU coreutils not detected)\n'
+fi
 
 # 7b. Python3 fallback (no realpath in PATH)
 PY_BIN="$TMP_ROOT/py-bin"
