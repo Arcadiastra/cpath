@@ -1,0 +1,671 @@
+#!/usr/bin/env bash
+set -euo pipefail
+unset CDPATH
+
+VERSION="0.1.0"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cpath"
+HOST_FILE="$CONFIG_DIR/host"
+
+# Output registers used to pass arbitrary paths without $(...) stripping trailing newlines
+RESOLVED_PATH=""
+PATH_DIRNAME=""
+PATH_BASENAME=""
+
+usage() {
+  cat <<'EOF'
+Usage: cpath [OPTIONS] [PATH...]
+
+Copy or print the canonical absolute path of one or more files or directories,
+with automatic SSH (OSC 52) and local clipboard support.
+
+Defaults to the current directory (.) when no PATH is given.
+Multiple PATH arguments are joined with newlines.
+
+Options:
+  -d                  Copy parent directory if PATH is a file
+  -s                  Prepend host (host:/abs/path)
+  -u                  Prepend user and host (user@host:/abs/path)
+  -n                  Do not resolve symlinks (realpath -s)
+  -p                  Print only; do not write to clipboard
+  -h, --help          Show this help message
+  -v, --version       Show version
+
+Config commands:
+  --set-host [ALIAS]  Save persistent host alias for this machine
+                      (prompts interactively if ALIAS is omitted)
+  --clear-host        Remove saved host alias (fallback to dynamic resolution)
+
+Host resolution priority (highest to lowest):
+  1. $CPATH_HOST          One-off environment override
+  2. ~/.config/cpath/host Saved persistent alias (--set-host)
+  3. $LC_SSH_HOST         Forwarded via ~/.ssh/config SetEnv
+  4. hostname             Current system hostname
+EOF
+}
+
+trim_whitespace() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+has_tty() {
+  (exec </dev/tty >/dev/tty) 2>/dev/null
+}
+
+# Sets PATH_DIRNAME and PATH_BASENAME using POSIX rules while preserving newlines
+split_path() {
+  local p="$1"
+
+  while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do
+    p="${p%/}"
+  done
+
+  if [ "$p" = "/" ]; then
+    PATH_DIRNAME="/"
+    PATH_BASENAME="/"
+    return 0
+  fi
+
+  case "$p" in
+    */*)
+      PATH_BASENAME="${p##*/}"
+      PATH_DIRNAME="${p%/*}"
+      while [ "${#PATH_DIRNAME}" -gt 1 ] && [ "${PATH_DIRNAME%/}" != "$PATH_DIRNAME" ]; do
+        PATH_DIRNAME="${PATH_DIRNAME%/}"
+      done
+      if [ -z "$PATH_DIRNAME" ]; then
+        PATH_DIRNAME="/"
+      fi
+      ;;
+    *)
+      PATH_DIRNAME="."
+      PATH_BASENAME="$p"
+      ;;
+  esac
+}
+
+# Pure Bash logical path normalization (preserves embedded and trailing newlines)
+normalize_logical_path() {
+  local rest="$1"
+  local -a stack=()
+  local len=0
+  local part
+
+  rest="${rest}/"
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    rest="${rest#*/}"
+    case "$part" in
+      ""|".")
+        continue
+        ;;
+      "..")
+        if [ "$len" -gt 0 ]; then
+          len=$((len - 1))
+          unset "stack[$len]"
+        fi
+        ;;
+      *)
+        stack[len]="$part"
+        len=$((len + 1))
+        ;;
+    esac
+  done
+
+  if [ "$len" -eq 0 ]; then
+    RESOLVED_PATH="/"
+  else
+    local out=""
+    local i
+    for ((i = 0; i < len; i++)); do
+      out+="/${stack[$i]}"
+    done
+    RESOLVED_PATH="$out"
+  fi
+}
+
+# Pure Bash physical path resolver (newline-safe, CDPATH-safe, leading-dash-safe)
+resolve_physical_bash() {
+  local orig_target="$1"
+  local work="$orig_target"
+  local had_trailing_slash=0
+  local max_links=40
+  local count=0
+  local safe_work safe_dir link resolved_dir
+
+  if [ "$work" != "/" ] && [ "${work%/}" != "$work" ]; then
+    had_trailing_slash=1
+    while [ "${#work}" -gt 1 ] && [ "${work%/}" != "$work" ]; do
+      work="${work%/}"
+    done
+  fi
+
+  while true; do
+    safe_work="$work"
+    case "$safe_work" in
+      /*) ;;
+      *) safe_work="./$safe_work" ;;
+    esac
+
+    if [ ! -L "$safe_work" ]; then
+      break
+    fi
+
+    if ! command -v readlink >/dev/null 2>&1; then
+      echo "cpath: $orig_target: cannot resolve symlink without 'readlink'" >&2
+      return 1
+    fi
+
+    count=$((count + 1))
+    if [ "$count" -gt "$max_links" ]; then
+      echo "cpath: $orig_target: Too many levels of symbolic links" >&2
+      return 1
+    fi
+
+    if ! link=$(readlink "$safe_work" && printf 'x'); then
+      echo "cpath: $orig_target: Failed to read symbolic link" >&2
+      return 1
+    fi
+    link="${link%x}"
+    link="${link%$'\n'}"
+
+    if [ "$link" != "/" ] && [ "${link%/}" != "$link" ]; then
+      had_trailing_slash=1
+      while [ "${#link}" -gt 1 ] && [ "${link%/}" != "$link" ]; do
+        link="${link%/}"
+      done
+    fi
+
+    case "$link" in
+      /*)
+        work="$link"
+        ;;
+      *)
+        split_path "$work"
+        safe_dir="$PATH_DIRNAME"
+        case "$safe_dir" in
+          /*) ;;
+          *) safe_dir="./$safe_dir" ;;
+        esac
+        if ! resolved_dir=$(CDPATH='' cd -P -- "$safe_dir" 2>/dev/null && pwd -P && printf 'x'); then
+          echo "cpath: $orig_target: No such file or directory" >&2
+          return 1
+        fi
+        resolved_dir="${resolved_dir%x}"
+        resolved_dir="${resolved_dir%$'\n'}"
+        if [ "$resolved_dir" = "/" ]; then
+          work="/$link"
+        else
+          work="$resolved_dir/$link"
+        fi
+        ;;
+    esac
+  done
+
+  safe_work="$work"
+  case "$safe_work" in
+    /*) ;;
+    *) safe_work="./$safe_work" ;;
+  esac
+
+  if [ -d "$safe_work" ]; then
+    if ! resolved_dir=$(CDPATH='' cd -P -- "$safe_work" 2>/dev/null && pwd -P && printf 'x'); then
+      echo "cpath: $orig_target: No such file or directory" >&2
+      return 1
+    fi
+    resolved_dir="${resolved_dir%x}"
+    RESOLVED_PATH="${resolved_dir%$'\n'}"
+    return 0
+  fi
+
+  if [ "$had_trailing_slash" -eq 1 ] && [ -e "$safe_work" ]; then
+    echo "cpath: $orig_target: Not a directory" >&2
+    return 1
+  fi
+
+  split_path "$work"
+  safe_dir="$PATH_DIRNAME"
+  case "$safe_dir" in
+    /*) ;;
+    *) safe_dir="./$safe_dir" ;;
+  esac
+
+  if ! resolved_dir=$(CDPATH='' cd -P -- "$safe_dir" 2>/dev/null && pwd -P && printf 'x'); then
+    echo "cpath: $orig_target: No such file or directory" >&2
+    return 1
+  fi
+  resolved_dir="${resolved_dir%x}"
+  resolved_dir="${resolved_dir%$'\n'}"
+
+  if [ "$PATH_BASENAME" = "/" ] || [ "$PATH_BASENAME" = "." ]; then
+    RESOLVED_PATH="$resolved_dir"
+  elif [ "$resolved_dir" = "/" ]; then
+    RESOLVED_PATH="/$PATH_BASENAME"
+  else
+    RESOLVED_PATH="$resolved_dir/$PATH_BASENAME"
+  fi
+}
+
+resolve_physical_python() {
+  local target="$1"
+  local out
+
+  if ! out=$(python3 - "$target" <<'PY'
+import errno
+import os
+import stat
+import sys
+
+def resolve_realpath(target):
+    if not target:
+        raise OSError(errno.ENOENT, os.strerror(errno.ENOENT), target)
+
+    trailing_slash_sentinel = object()
+    trailing_slash = target.endswith("/") and target != "/"
+    if os.path.isabs(target):
+        cur = "/"
+    else:
+        cur = os.getcwd()
+
+    parts = [p for p in target.split("/") if p]
+    if trailing_slash:
+        parts.append(trailing_slash_sentinel)
+
+    max_links = 40
+    link_count = 0
+    stack = list(parts)
+
+    while stack:
+        part = stack.pop(0)
+        if part is trailing_slash_sentinel or part == ".":
+            continue
+        if part == "..":
+            cur = os.path.dirname(cur)
+            continue
+
+        nxt = os.path.join(cur, part)
+        only_trailing_slash = bool(stack) and all(x is trailing_slash_sentinel for x in stack)
+        is_last = (len(stack) == 0)
+
+        try:
+            st = os.lstat(nxt)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT and (is_last or only_trailing_slash):
+                # Parent directory exists and is a directory; allow missing leaf
+                cur = nxt
+                break
+            raise
+
+        if stat.S_ISLNK(st.st_mode):
+            link_count += 1
+            if link_count > max_links:
+                raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), target)
+            link_target = os.readlink(nxt)
+            if os.path.isabs(link_target):
+                cur = "/"
+            link_parts = [p for p in link_target.split("/") if p]
+            if link_target.endswith("/") and link_target != "/":
+                link_parts.append(trailing_slash_sentinel)
+            stack = link_parts + stack
+        elif stat.S_ISDIR(st.st_mode):
+            cur = nxt
+        else:
+            if not is_last:
+                raise OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), target)
+            cur = nxt
+
+    return cur
+
+target = sys.argv[1]
+try:
+    result = resolve_realpath(target)
+except OSError as exc:
+    msg = exc.strerror or str(exc)
+    sys.stderr.buffer.write(b"cpath: " + os.fsencode(target) + (": %s\n" % msg).encode("utf-8", "replace"))
+    sys.exit(1)
+
+sys.stdout.buffer.write(os.fsencode(result) + b"x")
+PY
+  ); then
+    return 1
+  fi
+
+  RESOLVED_PATH="${out%x}"
+}
+
+# Sets RESOLVED_PATH to the resolved absolute path without losing trailing newlines
+resolve_abs_path() {
+  local target="$1"
+  local no_symlinks="$2"
+  local out
+
+  if [ -z "$target" ]; then
+    echo "cpath: empty path argument" >&2
+    return 1
+  fi
+
+  if [ "$no_symlinks" -eq 1 ]; then
+    local logical_target cwd
+    case "$target" in
+      /*)
+        logical_target="$target"
+        ;;
+      *)
+        if [ -n "${PWD:-}" ] && [ "$PWD" -ef . ]; then
+          logical_target="$PWD/$target"
+        else
+          cwd=$(CDPATH='' pwd -P && printf 'x')
+          cwd="${cwd%x}"
+          cwd="${cwd%$'\n'}"
+          logical_target="$cwd/$target"
+        fi
+        ;;
+    esac
+
+    normalize_logical_path "$logical_target"
+    return 0
+  fi
+
+  if command -v realpath >/dev/null 2>&1; then
+    # Anchor relative paths with ./ so both GNU and BusyBox realpath accept leading '-'
+    local safe_target="$target"
+    case "$safe_target" in
+      /*) ;;
+      *) safe_target="./$safe_target" ;;
+    esac
+
+    if ! out=$(realpath "$safe_target" && printf 'x'); then
+      return 1
+    fi
+    out="${out%x}"
+    out="${out%$'\n'}"
+
+    # BusyBox realpath can exit 0 with an unresolved symlink when a trailing '/'
+    # appears in the argument or an intermediate symlink target. Re-resolve via
+    # our internal resolver only if realpath's result is still a symlink.
+    if [ ! -L "$out" ]; then
+      RESOLVED_PATH="$out"
+      return 0
+    fi
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    resolve_physical_python "$target"
+  else
+    resolve_physical_bash "$target"
+  fi
+}
+
+get_system_hostname() {
+  if command -v hostname >/dev/null 2>&1; then
+    hostname
+  else
+    uname -n
+  fi
+}
+
+resolve_host() {
+  if [ -n "${CPATH_HOST:-}" ]; then
+    printf '%s' "$CPATH_HOST"
+    return 0
+  fi
+
+  if [ -s "$HOST_FILE" ]; then
+    local saved
+    saved=$(tr -d '\r\n' < "$HOST_FILE")
+    saved=$(trim_whitespace "$saved")
+    if [ -n "$saved" ]; then
+      printf '%s' "$saved"
+      return 0
+    fi
+  fi
+
+  if [ -n "${LC_SSH_HOST:-}" ]; then
+    printf '%s' "$LC_SSH_HOST"
+    return 0
+  fi
+
+  get_system_hostname
+}
+
+encode_base64() {
+  local text="$1"
+  if command -v base64 >/dev/null 2>&1; then
+    printf '%s' "$text" | base64 | tr -d '\r\n'
+  elif command -v python3 >/dev/null 2>&1; then
+    # Stream raw bytes over stdin to handle non-UTF-8 filenames and payloads > ARG_MAX
+    printf '%s' "$text" | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64encode(sys.stdin.buffer.read()))'
+  else
+    echo "cpath: neither 'base64' nor 'python3' found for OSC 52 encoding" >&2
+    return 1
+  fi
+}
+
+copy_to_clipboard() {
+  local text="$1"
+
+  # 1. Remote SSH session -> OSC 52 escape sequence
+  # Write to /dev/tty when a controlling terminal exists so stdout redirection
+  # does not swallow the escape sequence; otherwise fall back to stdout.
+  if [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CLIENT:-}" ]; then
+    local b64
+    b64=$(encode_base64 "$text")
+    if (exec >/dev/tty) 2>/dev/null; then
+      printf '\033]52;c;%s\a' "$b64" >/dev/tty
+    else
+      printf '\033]52;c;%s\a' "$b64"
+    fi
+    return 0
+  fi
+
+  # 2. Local clipboard backends
+  if command -v pbcopy >/dev/null 2>&1; then
+    printf '%s' "$text" | pbcopy
+  elif [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null 2>&1; then
+    printf '%s' "$text" | wl-copy
+  elif [ -n "${DISPLAY:-}" ] && command -v xclip >/dev/null 2>&1; then
+    printf '%s' "$text" | xclip -selection clipboard >/dev/null
+  elif [ -n "${DISPLAY:-}" ] && command -v xsel >/dev/null 2>&1; then
+    printf '%s' "$text" | xsel --clipboard --input
+  elif command -v clip.exe >/dev/null 2>&1; then
+    printf '%s' "$text" | clip.exe
+  else
+    echo "cpath: no clipboard backend found; printing path instead:" >&2
+    printf '%s\n' "$text"
+    return 1
+  fi
+}
+
+cmd_set_host() {
+  local alias_input="${1:-}"
+
+  if [ -z "$alias_input" ]; then
+    if has_tty; then
+      local current_host
+      current_host=$(resolve_host)
+      printf "SSH host alias for this machine [current: %s]: " "$current_host" >/dev/tty
+      IFS= read -r alias_input </dev/tty || true
+    else
+      echo "cpath: --set-host requires an alias argument" >&2
+      return 1
+    fi
+  fi
+
+  alias_input=$(trim_whitespace "$alias_input")
+  if [ -z "$alias_input" ]; then
+    echo "cpath: host alias cannot be empty (use --clear-host to remove)" >&2
+    return 1
+  fi
+
+  case "$alias_input" in
+    *[[:space:]]*|*[[:cntrl:]]*)
+      echo "cpath: host alias cannot contain whitespace or control characters: $(printf '%q' "$alias_input")" >&2
+      return 1
+      ;;
+  esac
+
+  mkdir -p "$CONFIG_DIR"
+  printf '%s\n' "$alias_input" > "$HOST_FILE"
+  echo "Saved host alias: $alias_input"
+}
+
+cmd_clear_host() {
+  rm -f "$HOST_FILE"
+  local fallback_host
+  fallback_host=$(resolve_host)
+  echo "Cleared saved host alias (will use dynamic hostname: $fallback_host)"
+}
+
+main() {
+  local dir_only=0
+  local with_host=0
+  local with_user=0
+  local no_symlinks=0
+  local print_only=0
+  local -a targets=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --help)
+        usage
+        exit 0
+        ;;
+      --version)
+        echo "cpath $VERSION"
+        exit 0
+        ;;
+      --set-host)
+        if [ $# -gt 2 ]; then
+          echo "cpath: --set-host takes at most one argument" >&2
+          exit 1
+        fi
+        cmd_set_host "${2:-}"
+        exit $?
+        ;;
+      --set-host=*)
+        if [ $# -gt 1 ]; then
+          echo "cpath: unexpected argument after --set-host: $2" >&2
+          exit 1
+        fi
+        cmd_set_host "${1#--set-host=}"
+        exit $?
+        ;;
+      --clear-host)
+        if [ $# -gt 1 ]; then
+          echo "cpath: --clear-host takes no arguments" >&2
+          exit 1
+        fi
+        cmd_clear_host
+        exit $?
+        ;;
+      --)
+        shift
+        while [ $# -gt 0 ]; do
+          targets+=("$1")
+          shift
+        done
+        break
+        ;;
+      --*)
+        echo "cpath: unknown option '$1'" >&2
+        usage >&2
+        exit 1
+        ;;
+      -?*)
+        local flags="${1#-}"
+        local i ch
+        for ((i = 0; i < ${#flags}; i++)); do
+          ch="${flags:$i:1}"
+          case "$ch" in
+            d) dir_only=1 ;;
+            s) with_host=1 ;;
+            u) with_host=1; with_user=1 ;;
+            n) no_symlinks=1 ;;
+            p) print_only=1 ;;
+            h) usage; exit 0 ;;
+            v) echo "cpath $VERSION"; exit 0 ;;
+            *)
+              echo "cpath: unknown option '-$ch'" >&2
+              usage >&2
+              exit 1
+              ;;
+          esac
+        done
+        shift
+        ;;
+      *)
+        targets+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [ "${#targets[@]}" -eq 0 ]; then
+    targets=(".")
+  fi
+
+  local host=""
+  local user=""
+  if [ "$with_host" -eq 1 ]; then
+    host=$(resolve_host)
+    if [ "$with_user" -eq 1 ]; then
+      user="${USER:-$(id -un)}"
+    fi
+  fi
+
+  local -a results=()
+  local target abs_path formatted
+  for target in "${targets[@]}"; do
+    resolve_abs_path "$target" "$no_symlinks"
+    abs_path="$RESOLVED_PATH"
+
+    if [ "$dir_only" -eq 1 ] && [ ! -d "$abs_path" ]; then
+      split_path "$abs_path"
+      abs_path="$PATH_DIRNAME"
+    fi
+
+    formatted="$abs_path"
+    if [ "$with_host" -eq 1 ]; then
+      if [ "$with_user" -eq 1 ]; then
+        formatted="${user}@${host}:${abs_path}"
+      else
+        formatted="${host}:${abs_path}"
+      fi
+    fi
+
+    results+=("$formatted")
+  done
+
+  local output=""
+  local idx
+  for ((idx = 0; idx < ${#results[@]}; idx++)); do
+    if [ "$idx" -gt 0 ]; then
+      output+=$'\n'
+    fi
+    output+="${results[$idx]}"
+  done
+
+  if [ "$print_only" -eq 1 ]; then
+    printf '%s\n' "$output"
+    exit 0
+  fi
+
+  copy_to_clipboard "$output"
+
+  # Escape control characters in terminal feedback while keeping clipboard and -p raw
+  local display_item
+  if [ "${#results[@]}" -eq 1 ]; then
+    display_item=$(printf '%q' "${results[0]}")
+    printf 'Copied: %s\n' "$display_item"
+  else
+    printf 'Copied %d paths:\n' "${#results[@]}"
+    for ((idx = 0; idx < ${#results[@]}; idx++)); do
+      display_item=$(printf '%q' "${results[$idx]}")
+      printf '%s\n' "$display_item"
+    done
+  fi
+}
+
+main "$@"

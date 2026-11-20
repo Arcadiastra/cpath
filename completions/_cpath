@@ -1,0 +1,55 @@
+#compdef cpath
+
+# Zsh completion script for cpath
+# Install to a directory in your $fpath (e.g. ~/.local/share/zsh/site-functions/_cpath)
+
+_cpath_host_aliases() {
+  emulate -L zsh
+  local -a host_aliases cfg_words
+  local host_file="${XDG_CONFIG_HOME:-$HOME/.config}/cpath/host"
+  local sys_host saved_host line token
+
+  if [[ -s "$host_file" ]]; then
+    saved_host=$(tr -d '\r\n' < "$host_file")
+    [[ -n "$saved_host" ]] && host_aliases+=("${saved_host}:saved cpath alias")
+  fi
+
+  sys_host=$(hostname 2>/dev/null || uname -n 2>/dev/null)
+  [[ -n "$sys_host" ]] && host_aliases+=("${sys_host}:system hostname")
+
+  if [[ -r "$HOME/.ssh/config" ]]; then
+    while IFS= read -r line; do
+      line="${line%%#*}"
+      cfg_words=(${=line})
+      if (( ${#cfg_words} >= 2 )) && [[ "${(L)cfg_words[1]}" == "host" ]]; then
+        for token in "${(@)cfg_words[2,-1]}"; do
+          case "$token" in
+            *'?'*|*'*'*|!*|'') continue ;;
+            *) host_aliases+=("${token}:~/.ssh/config host") ;;
+          esac
+        done
+      fi
+    done < "$HOME/.ssh/config"
+  fi
+
+  _describe -t host-aliases 'host alias' host_aliases
+}
+
+_cpath() {
+  local context state state_descr line
+  typeset -A opt_args
+
+  _arguments -s -S \
+    '-d[Copy parent directory if PATH is a file]' \
+    '(-u)-s[Prepend host (host:/abs/path)]' \
+    '(-s)-u[Prepend user and host (user@host:/abs/path)]' \
+    '-n[Do not resolve symlinks (realpath -s)]' \
+    '-p[Print only; do not write to clipboard]' \
+    '(- *)'{-h,--help}'[Show help message]' \
+    '(- *)'{-v,--version}'[Show version]' \
+    '(- *)--set-host=[Save persistent host alias for this machine]:host alias:_cpath_host_aliases' \
+    '(- *)--clear-host[Remove saved host alias]' \
+    '*:path:_files'
+}
+
+_cpath "$@"
