@@ -222,3 +222,7 @@ shellcheck bin/cpath install.sh uninstall.sh completions/cpath.bash tests/test_c
 ## 开源协议
 
 [MIT](LICENSE)
+
+## 友链
+
+[LINUX DO](https://linux.do)
